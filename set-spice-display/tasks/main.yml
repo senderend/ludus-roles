@@ -1,0 +1,20 @@
+---
+- name: Get VM ID for this host
+  shell: "qm list | grep {{ inventory_hostname }} | awk '{print $1}'"
+  register: vm_id_result
+  delegate_to: localhost
+
+- name: Display VM ID
+  debug:
+    msg: "Found VM ID: {{ vm_id_result.stdout }}"
+
+- name: Configure VM to use SPICE display (QXL)
+  shell: "qm set {{ vm_id_result.stdout }} --vga qxl"
+  delegate_to: localhost
+  when: vm_id_result.stdout != ""
+  register: qm_result
+
+- name: Display qm set result
+  debug:
+    msg: "{{ qm_result.stdout }}"
+  when: qm_result.stdout is defined

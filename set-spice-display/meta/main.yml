@@ -1,0 +1,20 @@
+---
+dependencies: []
+
+galaxy_info:
+  role_name: proxmox-spice-display
+  author: senderend
+  description: enables spice display on proxmox
+  company: SpecterOps
+  license: MIT
+  min_ansible_version: "2.10"
+  platforms:
+    - name: Debian
+      versions:
+        - all
+  galaxy_tags:
+    - spice
+    - xfce
+    - virtualization
+
+collections: []

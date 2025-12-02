@@ -1,0 +1,97 @@
+---
+- name: Install spice-vdagent package
+  apt:
+    name:
+      - spice-vdagent
+    state: present
+    update_cache: yes
+
+- name: Install build dependencies for spice-autorandr
+  apt:
+    name:
+      - build-essential
+      - libxrandr-dev
+      - libx11-dev
+      - libudev-dev
+      - pkg-config
+      - xorg-dev
+      - autoconf
+      - automake
+      - libtool
+      - git
+      - x11-utils
+    state: present
+
+- name: Clone spice-autorandr repository
+  git:
+    repo: https://github.com/seife/spice-autorandr.git
+    dest: /tmp/spice-autorandr
+    version: master
+    force: yes
+
+- name: Build spice-autorandr
+  shell: |
+    cd /tmp/spice-autorandr
+    autoreconf -is
+    ./configure
+    make
+    make install
+  args:
+    creates: /usr/local/bin/spice-autorandr
+
+- name: Create wrapper script
+  copy:
+    dest: /usr/local/bin/spice-autorandr-wrapper.sh
+    mode: '0755'
+    content: |
+      #!/bin/bash
+      # Run spice-autorandr in background
+      /usr/local/bin/spice-autorandr &
+      # Watch for resize events to restart agent
+      xev -root -event randr | \
+      grep --line-buffered 'subtype XRROutputChangeNotifyEvent' | \
+      while read foo ; do
+        sleep 0.3
+        killall spice-vdagent 2>/dev/null
+        spice-vdagent &
+      done
+
+- name: Create systemd user service directory
+  file:
+    path: /home/{{ ansible_user }}/.config/systemd/user
+    state: directory
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: '0755'
+
+- name: Install systemd user service
+  copy:
+    dest: /home/{{ ansible_user }}/.config/systemd/user/spice-autorandr.service
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    content: |
+      [Unit]
+      Description=SPICE Auto Resize with Agent Restart
+      After=default.target
+      PartOf=graphical-session.target
+
+      [Service]
+      Type=simple
+      Environment="DISPLAY=:0"
+      Environment="XAUTHORITY=/home/{{ ansible_user }}/.Xauthority"
+      ExecStartPre=/bin/sleep 2
+      ExecStart=/usr/local/bin/spice-autorandr-wrapper.sh
+      Restart=on-failure
+      RestartSec=5
+
+      [Install]
+      WantedBy=default.target
+
+- name: Enable systemd user service
+  become: yes
+  become_user: "{{ ansible_user }}"
+  systemd:
+    name: spice-autorandr.service
+    enabled: yes
+    daemon_reload: yes
+    scope: user

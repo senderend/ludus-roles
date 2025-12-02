@@ -1,0 +1,20 @@
+---
+dependencies: []
+
+galaxy_info:
+  role_name: spice_resize
+  author: senderend
+  description: Installs SPICE guest agent and adds auto-resize support for XFCE desktop VMs
+  company: SpecterOps
+  license: MIT
+  min_ansible_version: "2.10"
+  platforms:
+    - name: Debian
+      versions:
+        - all
+  galaxy_tags:
+    - spice
+    - xfce
+    - virtualization
+
+collections: []
