@@ -1,0 +1,44 @@
+---
+- name: Warm MCP package entrypoints
+  ansible.builtin.shell: |
+    set -euo pipefail
+    export PATH="{{ codex_devbox_npm_bin }}:$PATH"
+    timeout 30 npx -y @playwright/mcp@latest --help >/dev/null
+    timeout 30 npx -y @upstash/context7-mcp --help >/dev/null
+  args:
+    executable: /bin/bash
+  become: true
+  become_user: "{{ codex_devbox_user }}"
+  environment:
+    HOME: "{{ codex_devbox_home }}"
+  changed_when: false
+  failed_when: false
+
+- name: Configure standard Codex MCP servers
+  ansible.builtin.shell: |
+    set -euo pipefail
+    export PATH="{{ codex_devbox_npm_bin }}:$PATH"
+    mkdir -p "{{ codex_devbox_home }}/.codex"
+    chmod 700 "{{ codex_devbox_home }}/.codex"
+    {% if codex_devbox_mcp_openai_docs_enabled | bool %}
+    codex mcp remove openaiDeveloperDocs >/dev/null 2>&1 || true
+    codex mcp add openaiDeveloperDocs --url https://developers.openai.com/mcp
+    codex mcp list | grep -q openaiDeveloperDocs
+    {% endif %}
+    {% if codex_devbox_mcp_context7_enabled | bool %}
+    codex mcp remove context7 >/dev/null 2>&1 || true
+    codex mcp add context7 -- npx -y @upstash/context7-mcp@latest
+    codex mcp list | grep -q context7
+    {% endif %}
+    {% if codex_devbox_mcp_playwright_enabled | bool %}
+    codex mcp remove playwright >/dev/null 2>&1 || true
+    codex mcp add playwright -- npx -y @playwright/mcp@latest --headless
+    codex mcp list | grep -q playwright
+    {% endif %}
+  args:
+    executable: /bin/bash
+  become: true
+  become_user: "{{ codex_devbox_user }}"
+  environment:
+    HOME: "{{ codex_devbox_home }}"
+  changed_when: true

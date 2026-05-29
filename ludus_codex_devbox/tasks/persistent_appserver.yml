@@ -1,0 +1,321 @@
+---
+- name: Enable user lingering for Codex persistent app-server
+  ansible.builtin.shell: |
+    set -euo pipefail
+    if ! command -v loginctl >/dev/null 2>&1; then
+      echo skipped-no-loginctl
+      exit 0
+    fi
+    if ! loginctl show-user "{{ codex_devbox_user }}" >/dev/null 2>&1; then
+      echo skipped-no-logind-user
+      exit 0
+    fi
+    current="$(loginctl show-user "{{ codex_devbox_user }}" -p Linger --value 2>/dev/null || true)"
+    if [ "$current" != "yes" ]; then
+      loginctl enable-linger "{{ codex_devbox_user }}"
+      echo changed
+    else
+      echo ok
+    fi
+  args:
+    executable: /bin/bash
+  register: codex_devbox_linger_result
+  changed_when: "'changed' in codex_devbox_linger_result.stdout"
+  failed_when: false
+  when: codex_devbox_enable_linger | bool
+
+- name: Resolve Codex devbox user uid
+  ansible.builtin.command: id -u "{{ codex_devbox_user }}"
+  register: codex_devbox_uid
+  changed_when: false
+
+- name: Ensure user systemd manager is started
+  ansible.builtin.command: "systemctl start user@{{ codex_devbox_uid.stdout }}.service"
+  changed_when: false
+  failed_when: false
+
+- name: Create Codex app-server user directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ codex_devbox_user }}"
+    group: "{{ codex_devbox_user }}"
+    mode: "0700"
+  loop:
+    - "{{ codex_devbox_home }}/.codex"
+    - "{{ codex_devbox_home }}/.codex/app-server-control"
+    - "{{ codex_devbox_systemd_user_dir }}"
+
+- name: Merge Codex persistence feature flags
+  ansible.builtin.shell: |
+    set -euo pipefail
+    python3 - <<'PY'
+    from pathlib import Path
+
+    path = Path("{{ codex_devbox_codex_config_path }}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    before = path.read_text() if path.exists() else ""
+    lines = path.read_text().splitlines() if path.exists() else []
+    desired = {"goals": "true", "prevent_idle_sleep": "true"}
+
+    section_start = None
+    section_end = len(lines)
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped == "[features]":
+            section_start = index
+            continue
+        if section_start is not None and index > section_start and stripped.startswith("[") and stripped.endswith("]"):
+            section_end = index
+            break
+
+    if section_start is None:
+        if lines and lines[-1].strip():
+            lines.append("")
+        lines.append("[features]")
+        for key, value in desired.items():
+            lines.append(f"{key} = {value}")
+    else:
+        existing = {}
+        for index in range(section_start + 1, section_end):
+            stripped = lines[index].strip()
+            if "=" not in stripped or stripped.startswith("#"):
+                continue
+            existing[stripped.split("=", 1)[0].strip()] = index
+        for key, value in desired.items():
+            new_line = f"{key} = {value}"
+            if key in existing:
+                lines[existing[key]] = new_line
+            else:
+                lines.insert(section_end, new_line)
+                section_end += 1
+
+    after = "\n".join(lines).rstrip() + "\n"
+    if after != before:
+        path.write_text(after)
+        print("changed")
+    else:
+        print("ok")
+    PY
+    chown "{{ codex_devbox_user }}:{{ codex_devbox_user }}" "{{ codex_devbox_codex_config_path }}"
+    chmod 600 "{{ codex_devbox_codex_config_path }}"
+  args:
+    executable: /bin/bash
+  register: codex_devbox_config_merge_result
+  changed_when: "'changed' in codex_devbox_config_merge_result.stdout"
+
+- name: Install Codex pass-through wrapper
+  ansible.builtin.copy:
+    dest: "{{ codex_devbox_codex_passthrough_path }}"
+    owner: root
+    group: root
+    mode: "0755"
+    content: |
+      #!/usr/bin/env bash
+      exec "{{ codex_devbox_real_cli_path }}" "$@"
+
+- name: Create Codex VS Code adapter directory
+  ansible.builtin.file:
+    path: "{{ codex_devbox_vscode_adapter_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install Codex VS Code stdio-WebSocket adapter
+  ansible.builtin.copy:
+    src: app-server-stdio-ws-adapter.mjs
+    dest: "{{ codex_devbox_vscode_adapter_path }}"
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install Codex VS Code app-server wrapper
+  ansible.builtin.copy:
+    dest: "{{ codex_devbox_vscode_wrapper_path }}"
+    owner: root
+    group: root
+    mode: "0755"
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+
+      real_cli="{{ codex_devbox_real_cli_path }}"
+      adapter="{{ codex_devbox_vscode_adapter_path }}"
+      unit="{{ codex_devbox_appserver_unit_name }}"
+      socket_path="{{ codex_devbox_appserver_socket_path }}"
+
+      if [ "${1:-}" != "app-server" ]; then
+        exec "$real_cli" "$@"
+      fi
+
+      for arg in "$@"; do
+        case "$arg" in
+          -h|--help|help)
+            exec "$real_cli" "$@"
+            ;;
+        esac
+      done
+
+      uid="$(id -u)"
+      export HOME="${HOME:-{{ codex_devbox_home }}}"
+      export PATH="{{ codex_devbox_npm_bin }}:/usr/local/bin:/usr/bin:/bin:$PATH"
+      export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$uid}"
+      export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=/run/user/$uid/bus}"
+
+      systemctl --user start "$unit" >/dev/null 2>&1 || true
+
+      for _ in $(seq 1 100); do
+        [ -S "$socket_path" ] && break
+        sleep 0.1
+      done
+
+      if [ ! -S "$socket_path" ]; then
+        echo "Codex app-server socket not available: $socket_path" >&2
+        exit 1
+      fi
+
+      export CODEX_APP_SERVER_SOCKET="$socket_path"
+      exec /usr/bin/env node "$adapter" "$socket_path"
+
+- name: Install Codex persistent app-server user service
+  ansible.builtin.copy:
+    dest: "{{ codex_devbox_systemd_user_dir }}/{{ codex_devbox_appserver_unit_name }}"
+    owner: "{{ codex_devbox_user }}"
+    group: "{{ codex_devbox_user }}"
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=Persistent Codex app-server for VS Code Remote SSH
+
+      [Service]
+      Type=simple
+      ExecStart={{ codex_devbox_real_cli_path }} app-server --listen unix://
+      Restart=on-failure
+      RestartSec=2
+      Environment=HOME={{ codex_devbox_home }}
+      Environment=PATH={{ codex_devbox_npm_bin }}:/usr/local/bin:/usr/bin:/bin
+
+      [Install]
+      WantedBy=default.target
+
+- name: Merge VS Code Machine setting for Codex wrapper
+  ansible.builtin.shell: |
+    set -euo pipefail
+    install -d -o "{{ codex_devbox_user }}" -g "{{ codex_devbox_user }}" -m 0755 "{{ codex_devbox_home }}/.vscode-server/data"
+    install -d -o "{{ codex_devbox_user }}" -g "{{ codex_devbox_user }}" -m 0755 "{{ codex_devbox_home }}/.vscode-server/data/Machine"
+    install -d -o "{{ codex_devbox_user }}" -g "{{ codex_devbox_user }}" -m 0755 "{{ codex_devbox_home }}/.vscode-server/data/CachedExtensionVSIXs"
+    python3 - <<'PY'
+    import json
+    from pathlib import Path
+
+    path = Path("{{ codex_devbox_vscode_machine_settings_path }}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    before = path.read_text() if path.exists() else ""
+    if before.strip():
+        settings = json.loads(before)
+    else:
+        settings = {}
+    settings["chatgpt.cliExecutable"] = "{{ codex_devbox_vscode_wrapper_path }}"
+    after = json.dumps(settings, indent=2, sort_keys=True) + "\n"
+    if after != before:
+        path.write_text(after)
+        print("changed")
+    else:
+        print("ok")
+    PY
+    chown "{{ codex_devbox_user }}:{{ codex_devbox_user }}" "{{ codex_devbox_home }}/.vscode-server/data"
+    chown "{{ codex_devbox_user }}:{{ codex_devbox_user }}" "{{ codex_devbox_home }}/.vscode-server/data/Machine"
+    chown "{{ codex_devbox_user }}:{{ codex_devbox_user }}" "{{ codex_devbox_home }}/.vscode-server/data/CachedExtensionVSIXs"
+    chown "{{ codex_devbox_user }}:{{ codex_devbox_user }}" "{{ codex_devbox_vscode_machine_settings_path }}"
+    chmod 755 "{{ codex_devbox_home }}/.vscode-server/data"
+    chmod 755 "{{ codex_devbox_home }}/.vscode-server/data/Machine"
+    chmod 755 "{{ codex_devbox_home }}/.vscode-server/data/CachedExtensionVSIXs"
+    chmod 600 "{{ codex_devbox_vscode_machine_settings_path }}"
+  args:
+    executable: /bin/bash
+  register: codex_devbox_vscode_settings_result
+  changed_when: "'changed' in codex_devbox_vscode_settings_result.stdout"
+
+- name: Write optional Codex unattended profile
+  ansible.builtin.copy:
+    dest: "{{ codex_devbox_unattended_profile_path }}"
+    owner: "{{ codex_devbox_user }}"
+    group: "{{ codex_devbox_user }}"
+    mode: "0600"
+    content: |
+      approval_policy = "never"
+      sandbox_mode = "workspace-write"
+  when: codex_devbox_unattended_profile_enabled | bool
+
+- name: Enable and start Codex persistent app-server user service
+  ansible.builtin.shell: |
+    set -euo pipefail
+    export PATH="{{ codex_devbox_npm_bin }}:$PATH"
+    systemctl --user daemon-reload
+    systemctl --user enable --now "{{ codex_devbox_appserver_unit_name }}"
+
+    if [ "{{ codex_devbox_appserver_transient_unit }}.service" != "{{ codex_devbox_appserver_unit_name }}" ]; then
+      systemctl --user stop "{{ codex_devbox_appserver_transient_unit }}.service" >/dev/null 2>&1 || true
+      systemctl --user reset-failed "{{ codex_devbox_appserver_transient_unit }}.service" >/dev/null 2>&1 || true
+    fi
+
+    for _ in $(seq 1 100); do
+      if [ -S "{{ codex_devbox_appserver_socket_path }}" ]; then
+        break
+      fi
+      sleep 0.1
+    done
+
+    echo changed
+  args:
+    executable: /bin/bash
+  become: true
+  become_user: "{{ codex_devbox_user }}"
+  environment:
+    HOME: "{{ codex_devbox_home }}"
+    XDG_RUNTIME_DIR: "/run/user/{{ codex_devbox_uid.stdout }}"
+    DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/{{ codex_devbox_uid.stdout }}/bus"
+  register: codex_devbox_service_start_result
+  changed_when: "'changed' in codex_devbox_service_start_result.stdout"
+
+- name: Verify Codex persistent app-server behavior
+  ansible.builtin.shell: |
+    set -euo pipefail
+    export PATH="{{ codex_devbox_npm_bin }}:$PATH"
+    test -x "{{ codex_devbox_codex_passthrough_path }}"
+    "{{ codex_devbox_codex_passthrough_path }}" --version >/dev/null
+    test -x "{{ codex_devbox_vscode_wrapper_path }}"
+    "{{ codex_devbox_vscode_wrapper_path }}" --version >/dev/null
+    "{{ codex_devbox_vscode_wrapper_path }}" app-server --help >/dev/null
+    systemctl --user is-active --quiet "{{ codex_devbox_appserver_unit_name }}"
+    version_json="$(codex app-server daemon version)"
+    echo "$version_json"
+    python3 -c 'import json,sys; data=json.load(sys.stdin); assert data.get("status") == "running", data' <<<"$version_json"
+    test -S "{{ codex_devbox_appserver_socket_path }}"
+    pgrep -af 'codex.*app-server --listen unix://'
+    probe_output="$(
+      timeout 15 bash -c '
+        printf "%s\n" "$1" "$2" |
+          "{{ codex_devbox_vscode_wrapper_path }}" app-server --analytics-default-enabled |
+          head -n 4
+      ' _ \
+        '{"id":1,"method":"initialize","params":{"clientInfo":{"name":"codex-devbox-role","version":"0"},"capabilities":{"experimentalApi":true,"requestAttestation":false}}}' \
+        '{"id":2,"method":"thread/list","params":{}}' || true
+    )"
+    echo "$probe_output" | grep -q '"id":1'
+    echo "$probe_output" | grep -q '"id":2'
+    if ss -lntup | grep -iq codex; then
+      echo "Codex is listening on TCP; expected Unix socket only" >&2
+      ss -lntup | grep -i codex >&2
+      exit 1
+    fi
+  args:
+    executable: /bin/bash
+  become: true
+  become_user: "{{ codex_devbox_user }}"
+  environment:
+    HOME: "{{ codex_devbox_home }}"
+    XDG_RUNTIME_DIR: "/run/user/{{ codex_devbox_uid.stdout }}"
+    DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/{{ codex_devbox_uid.stdout }}/bus"
+  changed_when: false

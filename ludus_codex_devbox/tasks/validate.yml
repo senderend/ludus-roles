@@ -1,0 +1,82 @@
+---
+- name: Verify Codex devbox core tools
+  ansible.builtin.shell: |
+    set -euo pipefail
+    bwrap --version >/dev/null
+    tmux -V >/dev/null
+    node --version >/dev/null
+    npm --version >/dev/null
+    test -x "{{ codex_devbox_real_cli_path }}"
+    sudo -iu "{{ codex_devbox_user }}" bash -lc 'test "$(command -v codex)" = "$HOME/.npm-global/bin/codex"'
+    sudo -iu "{{ codex_devbox_user }}" bash -lc 'codex --help >/dev/null'
+    {% if codex_devbox_agent_browser_enabled | bool %}
+    sudo -iu "{{ codex_devbox_user }}" bash -lc 'test "$(command -v agent-browser)" = "$HOME/.npm-global/bin/agent-browser"'
+    sudo -iu "{{ codex_devbox_user }}" bash -lc 'agent-browser skills get core >/dev/null'
+    {% endif %}
+    {% if codex_devbox_playwright_enabled | bool %}
+    test -x /opt/google/chrome/chrome
+    {% endif %}
+    {% if codex_devbox_persistent_appserver_enabled | bool %}
+    test -x "{{ codex_devbox_codex_passthrough_path }}"
+    "{{ codex_devbox_codex_passthrough_path }}" --version >/dev/null
+    test -x "{{ codex_devbox_vscode_wrapper_path }}"
+    "{{ codex_devbox_vscode_wrapper_path }}" --version >/dev/null
+    "{{ codex_devbox_vscode_wrapper_path }}" app-server --help >/dev/null
+    sudo -iu "{{ codex_devbox_user }}" bash -seuo pipefail <<'REMOTE'
+    python3 - <<'PY'
+    import json
+    from pathlib import Path
+
+    settings_path = Path.home() / ".vscode-server/data/Machine/settings.json"
+    settings = json.loads(settings_path.read_text())
+    assert settings.get("chatgpt.cliExecutable") == "{{ codex_devbox_vscode_wrapper_path }}", settings
+    PY
+    for path in \
+      "$HOME/.vscode-server" \
+      "$HOME/.vscode-server/data" \
+      "$HOME/.vscode-server/data/Machine" \
+      "$HOME/.vscode-server/data/CachedExtensionVSIXs"
+    do
+      test -O "$path"
+      test -w "$path"
+    done
+    cache_probe="$HOME/.vscode-server/data/CachedExtensionVSIXs/.codex-devbox-write-test"
+    mkdir -p "$cache_probe"
+    printf ok > "$cache_probe/probe"
+    rm -rf "$cache_probe"
+    REMOTE
+    sudo -iu "{{ codex_devbox_user }}" env \
+      XDG_RUNTIME_DIR="/run/user/{{ codex_devbox_uid.stdout }}" \
+      DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/{{ codex_devbox_uid.stdout }}/bus" \
+      bash -seuo pipefail <<'REMOTE'
+    export PATH="$HOME/.npm-global/bin:$PATH"
+    systemctl --user is-active --quiet "{{ codex_devbox_appserver_unit_name }}"
+    codex app-server daemon version | python3 -c "import json,sys; data=json.load(sys.stdin); assert data.get(\"status\") == \"running\", data"
+    probe_output="$(
+      timeout 15 bash -c '
+        printf "%s\n" "$1" "$2" |
+          "{{ codex_devbox_vscode_wrapper_path }}" app-server --analytics-default-enabled |
+          head -n 4
+      ' _ \
+        '{"id":1,"method":"initialize","params":{"clientInfo":{"name":"codex-devbox-role","version":"0"},"capabilities":{"experimentalApi":true,"requestAttestation":false}}}' \
+        '{"id":2,"method":"thread/list","params":{}}' || true
+    )"
+    echo "$probe_output" | grep -q '"id":1'
+    echo "$probe_output" | grep -q '"id":2'
+    REMOTE
+    sudo -iu "{{ codex_devbox_user }}" test -S "{{ codex_devbox_appserver_socket_path }}"
+    pgrep -af 'codex.*app-server --listen unix://' >/dev/null
+    ! ss -lntup | grep -iq codex
+    {% endif %}
+    {% if codex_devbox_mcp_servers_enabled | bool and codex_devbox_mcp_openai_docs_enabled | bool %}
+    sudo -iu "{{ codex_devbox_user }}" bash -lc 'codex mcp list | grep -q openaiDeveloperDocs'
+    {% endif %}
+    {% if codex_devbox_mcp_servers_enabled | bool and codex_devbox_mcp_context7_enabled | bool %}
+    sudo -iu "{{ codex_devbox_user }}" bash -lc 'codex mcp list | grep -q context7'
+    {% endif %}
+    {% if codex_devbox_mcp_servers_enabled | bool and codex_devbox_mcp_playwright_enabled | bool %}
+    sudo -iu "{{ codex_devbox_user }}" bash -lc 'codex mcp list | grep -q playwright'
+    {% endif %}
+  args:
+    executable: /bin/bash
+  changed_when: false

@@ -1,0 +1,12 @@
+---
+galaxy_info:
+  role_name: ludus_codex_devbox
+  author: Allen DeMoura
+  description: Prepare a reusable Ludus devbox for Codex, VS Code Remote SSH, MCPs, and browser automation.
+  license: MIT
+  min_ansible_version: "2.16"
+  platforms:
+    - name: Ubuntu
+      versions:
+        - jammy
+dependencies: []

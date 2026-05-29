@@ -1,0 +1,210 @@
+---
+- name: Set Codex devbox facts
+  ansible.builtin.set_fact:
+    codex_devbox_home_resolved: "{{ codex_devbox_home }}"
+    codex_devbox_npm_bin: "{{ codex_devbox_npm_global_prefix }}/bin"
+    codex_devbox_codex_config_path: "{{ codex_devbox_home }}/.codex/config.toml"
+    codex_devbox_systemd_user_dir: "{{ codex_devbox_home }}/.config/systemd/user"
+
+- name: Set devbox hostname
+  ansible.builtin.hostname:
+    name: "{{ codex_devbox_hostname }}"
+  when: codex_devbox_hostname | length > 0
+
+- name: Ensure Codex devbox user exists
+  ansible.builtin.user:
+    name: "{{ codex_devbox_user }}"
+    shell: /bin/bash
+    groups: "{{ codex_devbox_user_groups }}"
+    append: true
+    create_home: true
+  when: codex_devbox_manage_user | bool
+
+- name: Ensure Codex devbox work directories exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ codex_devbox_user }}"
+    group: "{{ codex_devbox_user }}"
+    mode: "0755"
+  loop:
+    - "{{ codex_devbox_work_dir }}"
+    - "{{ codex_devbox_npm_global_prefix }}"
+    - "{{ codex_devbox_home }}/.codex"
+    - "{{ codex_devbox_home }}/.config"
+
+- name: Install Codex devbox base packages
+  ansible.builtin.apt:
+    name: "{{ codex_devbox_base_packages }}"
+    state: present
+    update_cache: true
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+
+- name: Install Node.js from NodeSource
+  when: codex_devbox_install_nodejs | bool
+  block:
+    - name: Download NodeSource setup script
+      ansible.builtin.get_url:
+        url: "{{ codex_devbox_nodesource_setup_url }}"
+        dest: /tmp/codex-devbox-nodesource-setup
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Configure NodeSource repository
+      ansible.builtin.command: /tmp/codex-devbox-nodesource-setup
+      args:
+        creates: /etc/apt/sources.list.d/nodesource.list
+
+    - name: Remove distro Node.js packages that conflict with NodeSource
+      ansible.builtin.apt:
+        name:
+          - libnode-dev
+          - libnode72
+          - nodejs
+          - nodejs-doc
+          - npm
+        state: absent
+        purge: true
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+
+    - name: Repair package state after distro Node.js removal
+      ansible.builtin.command: apt-get -f install -y
+      changed_when: false
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+
+    - name: Install modern Node.js
+      ansible.builtin.apt:
+        name: nodejs
+        state: latest
+        update_cache: true
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+
+- name: Configure user npm global prefix
+  ansible.builtin.command: npm config set prefix "{{ codex_devbox_npm_global_prefix }}"
+  become: true
+  become_user: "{{ codex_devbox_user }}"
+  environment:
+    HOME: "{{ codex_devbox_home }}"
+  changed_when: false
+
+- name: Put user npm tools first in shell PATH
+  ansible.builtin.blockinfile:
+    path: "{{ item }}"
+    create: true
+    owner: "{{ codex_devbox_user }}"
+    group: "{{ codex_devbox_user }}"
+    mode: "0644"
+    marker: "# {mark} CODEX DEVBOX LOCAL NPM PATH"
+    block: |
+      export PATH="$HOME/.npm-global/bin:$PATH"
+  loop:
+    - "{{ codex_devbox_home }}/.bashrc"
+    - "{{ codex_devbox_home }}/.profile"
+  when: codex_devbox_configure_shell_path | bool
+
+- name: Create VS Code server environment directory
+  ansible.builtin.file:
+    path: "{{ codex_devbox_home }}/.vscode-server"
+    state: directory
+    owner: "{{ codex_devbox_user }}"
+    group: "{{ codex_devbox_user }}"
+    mode: "0755"
+  when: codex_devbox_configure_vscode_server_env | bool
+
+- name: Create VS Code server data directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ codex_devbox_user }}"
+    group: "{{ codex_devbox_user }}"
+    mode: "0755"
+  loop:
+    - "{{ codex_devbox_home }}/.vscode-server/data"
+    - "{{ codex_devbox_home }}/.vscode-server/data/Machine"
+    - "{{ codex_devbox_home }}/.vscode-server/data/CachedExtensionVSIXs"
+  when: codex_devbox_configure_vscode_server_env | bool
+
+- name: Make VS Code Remote SSH include user npm tools
+  ansible.builtin.copy:
+    dest: "{{ codex_devbox_home }}/.vscode-server/server-env-setup"
+    owner: "{{ codex_devbox_user }}"
+    group: "{{ codex_devbox_user }}"
+    mode: "0644"
+    content: |
+      export PATH="{{ codex_devbox_npm_bin }}:$PATH"
+  when: codex_devbox_configure_vscode_server_env | bool
+
+- name: Install Codex devbox npm tools
+  ansible.builtin.command: "npm install -g {{ item }}"
+  loop: "{{ codex_devbox_npm_global_packages }}"
+  become: true
+  become_user: "{{ codex_devbox_user }}"
+  environment:
+    HOME: "{{ codex_devbox_home }}"
+    PATH: "{{ codex_devbox_npm_bin }}:{{ ansible_env.PATH }}"
+  changed_when: true
+
+- name: Resolve real Codex CLI path
+  ansible.builtin.shell: |
+    set -euo pipefail
+    if [ -n "{{ codex_devbox_cli_path }}" ]; then
+      printf '%s\n' "{{ codex_devbox_cli_path }}"
+    elif command -v codex >/dev/null 2>&1; then
+      command -v codex
+    else
+      printf '%s\n' "{{ codex_devbox_npm_bin }}/codex"
+    fi
+  args:
+    executable: /bin/bash
+  become: true
+  become_user: "{{ codex_devbox_user }}"
+  environment:
+    HOME: "{{ codex_devbox_home }}"
+    PATH: "{{ codex_devbox_npm_bin }}:{{ ansible_env.PATH }}"
+  register: codex_devbox_resolved_cli
+  changed_when: false
+
+- name: Set resolved Codex CLI path
+  ansible.builtin.set_fact:
+    codex_devbox_real_cli_path: "{{ codex_devbox_resolved_cli.stdout | trim }}"
+
+- name: Configure persistent Codex app-server
+  ansible.builtin.import_tasks: persistent_appserver.yml
+  when: codex_devbox_persistent_appserver_enabled | bool
+
+- name: Configure browser automation tools
+  ansible.builtin.import_tasks: browser.yml
+  when: codex_devbox_agent_browser_enabled | bool or codex_devbox_playwright_enabled | bool
+
+- name: Configure Codex MCP servers
+  ansible.builtin.import_tasks: mcp.yml
+  when: codex_devbox_mcp_servers_enabled | bool
+
+- name: Install Ludus client
+  ansible.builtin.shell: timeout 120 bash -c 'curl --connect-timeout 10 -fsSL https://ludus.cloud/install | bash'
+  args:
+    executable: /bin/bash
+    creates: /usr/local/bin/ludus
+  register: codex_devbox_ludus_client_install
+  failed_when: false
+  changed_when: codex_devbox_ludus_client_install.rc == 0
+  when: codex_devbox_install_ludus_client | bool
+
+- name: Validate Codex devbox
+  ansible.builtin.import_tasks: validate.yml
+  when: codex_devbox_validation_enabled | bool
+
+- name: Show Codex devbox next steps
+  ansible.builtin.debug:
+    msg:
+      - "Codex devbox is ready."
+      - "Connect with VS Code Remote SSH as {{ codex_devbox_user }}."
+      - "The role wrote remote VS Code Machine setting: {{ codex_devbox_vscode_machine_settings_path }}"
+      - "Expected setting: chatgpt.cliExecutable = {{ codex_devbox_vscode_wrapper_path }}"
+      - "No manual settings.json edit should be required; install the OpenAI/Codex extension in the remote window and reload/reconnect if needed."
+      - "Authenticate Codex interactively or sync a trusted local Codex runtime after deploy."

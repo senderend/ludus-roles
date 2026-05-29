@@ -1,0 +1,69 @@
+---
+codex_devbox_user: localuser
+codex_devbox_home: "/home/{{ codex_devbox_user }}"
+codex_devbox_manage_user: true
+codex_devbox_user_groups:
+  - sudo
+codex_devbox_work_dir: "{{ codex_devbox_home }}/work"
+codex_devbox_hostname: ""
+
+codex_devbox_base_packages:
+  - ca-certificates
+  - bubblewrap
+  - curl
+  - dbus-user-session
+  - dnsutils
+  - gcc
+  - g++
+  - git
+  - gnupg
+  - iproute2
+  - jq
+  - make
+  - netcat-openbsd
+  - pipx
+  - python3
+  - python3-dev
+  - python3-pip
+  - python3-venv
+  - sudo
+  - tmux
+  - vim
+
+codex_devbox_install_nodejs: true
+codex_devbox_nodesource_setup_url: https://deb.nodesource.com/setup_22.x
+codex_devbox_npm_global_prefix: "{{ codex_devbox_home }}/.npm-global"
+codex_devbox_npm_global_packages:
+  - "@openai/codex@latest"
+
+codex_devbox_cli_path: ""
+
+codex_devbox_configure_shell_path: true
+codex_devbox_configure_vscode_server_env: true
+
+codex_devbox_persistent_appserver_enabled: true
+codex_devbox_enable_linger: true
+codex_devbox_appserver_socket_path: "{{ codex_devbox_home }}/.codex/app-server-control/app-server-control.sock"
+codex_devbox_appserver_transient_unit: codex-app-server-proof
+codex_devbox_appserver_unit_name: codex-app-server.service
+codex_devbox_codex_passthrough_path: /usr/local/bin/codex
+codex_devbox_vscode_wrapper_path: /usr/local/bin/codex-vscode-lab
+codex_devbox_vscode_adapter_dir: /usr/local/lib/codex-vscode-lab
+codex_devbox_vscode_adapter_path: "{{ codex_devbox_vscode_adapter_dir }}/app-server-stdio-ws-adapter.mjs"
+codex_devbox_vscode_machine_settings_path: "{{ codex_devbox_home }}/.vscode-server/data/Machine/settings.json"
+
+codex_devbox_unattended_profile_enabled: false
+codex_devbox_unattended_profile_path: "{{ codex_devbox_home }}/.codex/lab-unattended.config.toml"
+
+codex_devbox_agent_browser_enabled: true
+codex_devbox_agent_browser_npm_package: "agent-browser@latest"
+codex_devbox_agent_browser_skill_enabled: true
+codex_devbox_playwright_enabled: true
+
+codex_devbox_mcp_servers_enabled: true
+codex_devbox_mcp_openai_docs_enabled: true
+codex_devbox_mcp_context7_enabled: true
+codex_devbox_mcp_playwright_enabled: true
+
+codex_devbox_install_ludus_client: false
+codex_devbox_validation_enabled: true

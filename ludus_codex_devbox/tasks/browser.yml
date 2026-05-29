@@ -1,0 +1,68 @@
+---
+- name: Install agent-browser npm package
+  ansible.builtin.command: "npm install -g {{ codex_devbox_agent_browser_npm_package }}"
+  become: true
+  become_user: "{{ codex_devbox_user }}"
+  environment:
+    HOME: "{{ codex_devbox_home }}"
+    PATH: "{{ codex_devbox_npm_bin }}:{{ ansible_env.PATH }}"
+  changed_when: true
+  when: codex_devbox_agent_browser_enabled | bool
+
+- name: Install agent-browser Linux dependencies and browser runtime
+  ansible.builtin.shell: |
+    set -euo pipefail
+    export PATH="{{ codex_devbox_npm_bin }}:$PATH"
+    agent-browser install --with-deps
+  args:
+    executable: /bin/bash
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+  changed_when: false
+  when: codex_devbox_agent_browser_enabled | bool
+
+- name: Install agent-browser runtime and Codex skill
+  ansible.builtin.shell: |
+    set -euo pipefail
+    export PATH="{{ codex_devbox_npm_bin }}:$PATH"
+    agent-browser install
+    if [ ! -f "{{ codex_devbox_home }}/.agents/skills/agent-browser/SKILL.md" ]; then
+      npx -y skills add vercel-labs/agent-browser -g -a codex -y --copy
+    fi
+    agent-browser skills get core >/dev/null
+  args:
+    executable: /bin/bash
+  become: true
+  become_user: "{{ codex_devbox_user }}"
+  environment:
+    HOME: "{{ codex_devbox_home }}"
+  changed_when: false
+  when:
+    - codex_devbox_agent_browser_enabled | bool
+    - codex_devbox_agent_browser_skill_enabled | bool
+
+- name: Install Playwright Chromium OS dependencies
+  ansible.builtin.command: npx -y playwright@latest install-deps chromium
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+  changed_when: false
+  when: codex_devbox_playwright_enabled | bool
+
+- name: Install Playwright Chrome browser for MCP default
+  ansible.builtin.command: npx -y playwright@latest install chrome
+  args:
+    creates: /opt/google/chrome/chrome
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+  when: codex_devbox_playwright_enabled | bool
+
+- name: Install Playwright Chromium browser for devbox user
+  ansible.builtin.command: npx -y playwright@latest install chromium
+  become: true
+  become_user: "{{ codex_devbox_user }}"
+  args:
+    creates: "{{ codex_devbox_home }}/.cache/ms-playwright"
+  environment:
+    HOME: "{{ codex_devbox_home }}"
+    PATH: "{{ codex_devbox_npm_bin }}:{{ ansible_env.PATH }}"
+  when: codex_devbox_playwright_enabled | bool
