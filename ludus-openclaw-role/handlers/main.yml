@@ -1,0 +1,13 @@
+---
+# Handlers for OpenClaw role
+
+- name: Restart OpenClaw
+  ansible.builtin.shell: |
+    cd /opt/openclaw && docker compose restart
+  become: yes
+  become_user: openclaw
+
+- name: Reload UFW
+  ansible.builtin.shell: |
+    ufw reload
+  changed_when: true

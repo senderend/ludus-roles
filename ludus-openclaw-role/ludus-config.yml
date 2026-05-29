@@ -1,0 +1,66 @@
+# Ludus Configuration for Hardened OpenClaw Deployment
+# 
+# Usage:
+#   1. Copy the ludus-openclaw-role to your Ludus roles directory:
+#      ludus ansible role add -d ./ludus-openclaw-role
+#   
+#   2. Update your ludus config:
+#      ludus range config set -f ludus-config.yml
+#   
+#   3. Deploy:
+#      ludus range deploy
+#
+# Access via Tailscale:
+#   Since you have Tailscale subnet routing on the Ludus host, 
+#   expose the 10.x.x.x range and access OpenClaw at:
+#   http://<vm-ip>:18789
+
+ludus:
+  - vm_name: "{{ range_id }}-openclaw"
+    hostname: "openclaw"
+    template: debian-12-x64-server-template
+    vlan: 20
+    ip_last_octet: 50
+    ram_gb: 8
+    cpus: 4
+    # Larger disk for workspace/models if needed
+    # windows: false (default for Linux)
+    
+    roles:
+      - ludus-openclaw-role
+    
+    role_vars:
+      # Gateway settings
+      openclaw_gateway_port: 18789
+      openclaw_gateway_bind: "lan"
+      
+      # Security hardening
+      openclaw_mdns_enabled: false
+      openclaw_sandbox_enabled: true
+      openclaw_sandbox_scope: "agent"
+      openclaw_sandbox_network: "none"
+      
+      # Disable browser automation unless needed
+      openclaw_browser_enabled: false
+      
+      # Network access - allow from your Tailscale/Ludus range
+      openclaw_expose_to_ludus_range: true
+      openclaw_allowed_cidr: "10.0.0.0/8"
+      
+      # Session retention (days)
+      openclaw_session_max_age_days: 14
+      
+      # Resource limits
+      openclaw_cpu_limit: "2.0"
+      openclaw_memory_limit: "4G"
+      
+      # API keys - set these for your preferred provider
+      # Option 1: Set here (stored in config - less secure)
+      # openclaw_anthropic_api_key: "sk-ant-xxxxx"
+      
+      # Option 2: Set via Ludus secrets (recommended)
+      # Use: ludus range secrets set ANTHROPIC_API_KEY "sk-ant-xxxxx"
+      # Then reference: openclaw_anthropic_api_key: "{{ lookup('env', 'ANTHROPIC_API_KEY') }}"
+      
+      # Logging
+      openclaw_log_level: "info"

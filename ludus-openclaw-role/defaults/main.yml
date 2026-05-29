@@ -1,0 +1,51 @@
+---
+# OpenClaw Ludus Role - Default Variables
+# Override these in your Ludus config as needed
+
+# Gateway configuration
+openclaw_gateway_port: 18789
+# Bind mode: "loopback" (most secure), "lan" (needed for remote access)
+# Since we're using Tailscale subnet routing, lan binding to host IP is acceptable
+openclaw_gateway_bind: "lan"
+
+# Authentication - will be auto-generated if not provided
+# openclaw_gateway_token: ""
+
+# mDNS discovery - disabled for security (prevents network enumeration)
+openclaw_mdns_enabled: false
+
+# Model provider API keys (optional - can be set post-deployment)
+# openclaw_anthropic_api_key: ""
+# openclaw_openai_api_key: ""
+# openclaw_openrouter_api_key: ""
+
+# Sandboxing configuration
+openclaw_sandbox_enabled: true
+# Scope: "agent" (per-agent isolation) or "session" (per-session) or "shared"
+openclaw_sandbox_scope: "agent"
+# Sandbox network: "none" (no network), "bridge" (limited), "host" (full - not recommended)
+openclaw_sandbox_network: "none"
+
+# Browser automation
+openclaw_browser_enabled: false
+
+# Session settings
+openclaw_session_max_age_days: 14
+
+# Hooks/webhooks
+openclaw_hooks_enabled: false
+
+# Network access control
+# Allow access from Ludus range (your lab network)
+openclaw_expose_to_ludus_range: true
+openclaw_allowed_cidr: "10.0.0.0/8"
+
+# Container inter-communication
+openclaw_container_icc: true
+
+# Resource limits
+openclaw_cpu_limit: "2.0"
+openclaw_memory_limit: "4G"
+
+# Logging
+openclaw_log_level: "info"

@@ -1,0 +1,214 @@
+---
+# OpenClaw Hardened Deployment for Ludus
+# Deploys OpenClaw in Docker with security hardening
+
+- name: Update apt cache
+  ansible.builtin.apt:
+    update_cache: yes
+    cache_valid_time: 3600
+
+- name: Install required packages
+  ansible.builtin.apt:
+    name:
+      - docker.io
+      - docker-compose-plugin
+      - ufw
+      - curl
+      - jq
+      - pwgen
+    state: present
+
+- name: Ensure Docker service is running
+  ansible.builtin.systemd:
+    name: docker
+    state: started
+    enabled: yes
+
+- name: Create openclaw group
+  ansible.builtin.group:
+    name: openclaw
+    state: present
+
+- name: Create openclaw user
+  ansible.builtin.user:
+    name: openclaw
+    shell: /bin/bash
+    group: openclaw
+    groups: docker
+    create_home: yes
+    home: /home/openclaw
+  register: openclaw_user
+
+- name: Create OpenClaw directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: openclaw
+    group: openclaw
+    mode: '0700'
+  loop:
+    - /home/openclaw/.openclaw
+    - /home/openclaw/.openclaw/config
+    - /home/openclaw/.openclaw/workspace
+    - /home/openclaw/.openclaw/agents
+    - /opt/openclaw
+
+- name: Check if gateway token file exists
+  ansible.builtin.stat:
+    path: /home/openclaw/.openclaw/.gateway_token
+  register: token_file
+
+- name: Generate secure gateway token
+  ansible.builtin.shell: |
+    pwgen -s 64 1 | tee /home/openclaw/.openclaw/.gateway_token
+  register: gateway_token_gen
+  when: 
+    - not token_file.stat.exists
+    - openclaw_gateway_token is not defined or openclaw_gateway_token == ''
+
+- name: Read existing gateway token
+  ansible.builtin.slurp:
+    src: /home/openclaw/.openclaw/.gateway_token
+  register: existing_token
+  when: token_file.stat.exists
+
+- name: Set gateway token fact from generation
+  ansible.builtin.set_fact:
+    _openclaw_gateway_token: "{{ gateway_token_gen.stdout | trim }}"
+  when: gateway_token_gen is changed
+
+- name: Set gateway token fact from existing file
+  ansible.builtin.set_fact:
+    _openclaw_gateway_token: "{{ existing_token.content | b64decode | trim }}"
+  when: 
+    - token_file.stat.exists
+    - gateway_token_gen is not changed
+
+- name: Set gateway token fact from variable
+  ansible.builtin.set_fact:
+    _openclaw_gateway_token: "{{ openclaw_gateway_token }}"
+  when: 
+    - openclaw_gateway_token is defined 
+    - openclaw_gateway_token != ''
+
+- name: Save gateway token to persistent file
+  ansible.builtin.copy:
+    content: "{{ _openclaw_gateway_token }}"
+    dest: /home/openclaw/.openclaw/.gateway_token
+    owner: openclaw
+    group: openclaw
+    mode: '0600'
+  when: gateway_token_gen is changed
+
+- name: Set openclaw UID/GID facts
+  ansible.builtin.set_fact:
+    openclaw_uid: "{{ openclaw_user.uid }}"
+    openclaw_gid: "{{ openclaw_user.group }}"
+
+- name: Get openclaw group GID
+  ansible.builtin.command: id -g openclaw
+  register: openclaw_gid_cmd
+  changed_when: false
+
+- name: Set GID fact
+  ansible.builtin.set_fact:
+    openclaw_gid: "{{ openclaw_gid_cmd.stdout }}"
+
+- name: Template docker-compose.yml
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: /opt/openclaw/docker-compose.yml
+    owner: openclaw
+    group: openclaw
+    mode: '0600'
+
+- name: Template OpenClaw config
+  ansible.builtin.template:
+    src: config.yaml.j2
+    dest: /home/openclaw/.openclaw/config/config.yaml
+    owner: openclaw
+    group: openclaw
+    mode: '0600'
+
+- name: Template environment file
+  ansible.builtin.template:
+    src: env.j2
+    dest: /opt/openclaw/.env
+    owner: openclaw
+    group: openclaw
+    mode: '0600'
+
+- name: Configure UFW defaults
+  ansible.builtin.shell: |
+    ufw default deny incoming
+    ufw default allow outgoing
+  changed_when: true
+
+- name: Allow SSH through UFW
+  ansible.builtin.shell: |
+    ufw allow 22/tcp
+  changed_when: true
+
+- name: Allow Ludus range access to gateway (if enabled)
+  ansible.builtin.shell: |
+    ufw allow from {{ openclaw_allowed_cidr }} to any port {{ openclaw_gateway_port }} proto tcp
+  when: openclaw_expose_to_ludus_range | bool
+  changed_when: true
+
+- name: Enable UFW
+  ansible.builtin.shell: |
+    ufw --force enable
+  changed_when: true
+
+- name: Pull OpenClaw Docker images
+  ansible.builtin.shell: |
+    cd /opt/openclaw && docker compose pull
+  become: yes
+  become_user: openclaw
+  register: docker_pull
+  retries: 3
+  delay: 10
+  until: docker_pull.rc == 0
+
+- name: Start OpenClaw services
+  ansible.builtin.shell: |
+    cd /opt/openclaw && docker compose up -d
+  become: yes
+  become_user: openclaw
+
+- name: Wait for gateway to be healthy
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ openclaw_gateway_port }}/health"
+    method: GET
+    status_code: [200, 401]  # 401 is ok - means auth is working
+  register: health_check
+  retries: 12
+  delay: 5
+  until: health_check.status in [200, 401]
+  ignore_errors: yes
+
+- name: Save gateway credentials to file for reference
+  ansible.builtin.copy:
+    content: |
+      # OpenClaw Gateway Credentials
+      # Generated: {{ ansible_date_time.iso8601 }}
+      # 
+      # Gateway URL (from Tailscale subnet): http://{{ ansible_default_ipv4.address }}:{{ openclaw_gateway_port }}
+      # 
+      GATEWAY_TOKEN={{ _openclaw_gateway_token }}
+    dest: /home/openclaw/.openclaw/CREDENTIALS.txt
+    owner: openclaw
+    group: openclaw
+    mode: '0600'
+
+- name: Display connection info
+  ansible.builtin.debug:
+    msg: |
+      OpenClaw deployed successfully!
+      
+      Gateway URL: http://{{ ansible_default_ipv4.address }}:{{ openclaw_gateway_port }}
+      Token location: /home/openclaw/.openclaw/CREDENTIALS.txt
+      
+      Access via Tailscale subnet routing from your Ludus host.
+      
+      Health check status: {{ health_check.status | default('unknown') }}
